@@ -4,7 +4,9 @@
 #include <sys/msg.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 #include <unistd.h>
+#include "helpers.h"
 
 #define MENU 1
 #define ORDER 2
@@ -15,9 +17,14 @@ struct msgbuf{
     char mtext[64]; //message data
 };
 
+struct timeval{
+    time_t tv_sec;
+    suseconds_t tv_usec;
+};
+
 key_t key = ftok("\mnt\c\Users\Aweso\SchoolArchive\3207OS\exe\key.txt", 'S');
   if(key_t == -1){
-        perror("file open failed");
+        perror("open file failed");
         exit(1);
   }
   
@@ -29,32 +36,52 @@ int qid = msgget(key, IPC_CREAT | 0666);
 
 //log layter
 
-void waiting(){
+void logSeconds(){
     
-    int min = 2;
-    int max = 6;
+    struct timeval timep;
+    
+    gettimeofday(&timep, NULL);
+    printf("Seconds: %ld Microseconds: %ld ",(long)timep.tv_sec, (long)timep.tv_usec);
+    
+}
+
+int waiting(int min, int max){
     
     srand(time(NULL)); 
     int r = min + rand() % (max - min + 1); 
-    sleep(r);
+    return r;
     
 }
 
 void waiter(int customers, int orders){
 
+    int element;
     struct msgbuf msgp;
     
+    //Send a random food item to the customer
+    char _line[1000] = "Pepino's Signature Pie|TyeDye Surprise|That's Amore Brunch|Pizza Ball|7-Up\n";
+    char *line = strdup(_line);
+    char **array = parse(line ,"|");
+    
     for(int i = 0; i < (customers * orders); i++){
-        msgp.mtype = MENU;
-        strcpy(msgp.mtext, "This is message 1");
-        msgsnd(qid, msgp, 256, NULL);              //sends out the menu to the IPC
-        printf("The waiter is about to pick up the meal...");
-        waiting();
         
-        msgrcv(qid, msgp, 256, ORDER_CMPL, NULL); //what flag if any
-        printf("The waiter is cleaning the table..."); //what do i do with the meal... why do i recieve it?
-        waiting();
+        element = waiting(0, 4);
+        
+        msgp.mtype = MENU;
+        strcpy(msgp.mtext, array[element]);
+        msgsnd(qid, msgp, 256, NULL);              //sends out the menu to the IPC
+        logSeconds();
+        printf("\nThe waiter is about to pick up the meal...");
+        sleep(waiting(2, 6));
+        
+        msgrcv(qid, msgp, 256, ORDER_CMPL, NULL); //no flag, so we block until message is recieved
+        logSeconds();
+        printf("\nThe waiter is cleaning the table...");
+        sleep(waiting(2, 6));
     }
+    
+    free(array);
+    free(line);
     
     
     /*
@@ -71,28 +98,33 @@ Reset loop until no customers(?)
 void customer(int orders){
     //fork
     
-    srand(time(NULL)); 
-    int r = 0 + rand() % (999 - 0 + 1); 
-    
     struct msgbuf msgp;
+    pid_t pid = getpid();
     
     for(int i = 0; i < orders; i++){
         
-        srand(time(NULL)); 
-        int t = 0 + rand() % (999 - 0 + 1); 
-        
-        printf("Customer table %d, order %d is waiting for a menu...", r, t);
-        waiting(); //actually blocking is all that's needed
+        logSeconds();
+        printf("\nCustomer %d is waiting for a menu...", (int)pid);
+        sleep(waiting(2, 6)); //actually blocking is all that's needed
         msgrcv(qid, msgp, 256, MENU, NULL);
 
-        printf("Customer table %d, order %d is deciding what to get...", r, t);
-        waiting();
+        //next 3 lines are to concatenate a menu item and "customer PID"
+        size_t needed = strlen(msgp.mtext + 48);
+        char *result = malloc(needed);
+        snprintf(result, needed, "%s from customer %d", msgp.mtext, (int)pid);
+
+        logSeconds();
+        printf("\nCustomer %d is eyeing '%s'...", (int)pid, msgp.mtext);
+        sleep(waiting(2,6));
         msgp.mtype = ORDER;
-        strcpy(msgp.mtext, "This is message 2");
+        strcpy(msgp.mtext, result); //this PID and then 
         msgsnd(qid, msgp, 256, NULL); //what's the deal with PID bro
         
-        printf("Customer table %d, order %d is either eating or waiting...", r, t);
-        waiting(); //should it recieve the food? ...
+        logSeconds();
+        printf("\nCustomer %d is either eating or waiting...", (int)pid);
+        sleep(waiting(2, 6)); //should it recieve the food? ...
+        
+        free(result);
 
     }
     
@@ -108,22 +140,37 @@ once done, repeats the loop (free table for other customer?)
 }
 
 
-void chefs(){
+void chef(){
+    //fork
+    
+    struct msgbuf msgp;
+    pid_t pid = getpid();
     
     //loop but what's the condition "continue when there's another order"
                     //ig maybe when customers are done send some sort of signal out here to say we're done.
-        //ftok for debugging purposes
-        //msgrcv(order ID struct)
-        //waiting()
-        //msgsnd(order-complete ID struct)
+
     
+    while(1){ //find way to terminate loop
+        
+        msgrcv(qid, msgp, 256, ORDER, NULL);
+        logSeconds();
+        printf("\nChef %d is preparing: %s ...", (int)pid, msgp.mtext);
+        sleep(waiting(2, 6));
+        
+        msgp.mtype = ORDER_CMPL;
+        msgsnd(qid, msgp, 256, NULL);
+        logSeconds();
+        printf("\nChef %d completed: %s ...", (int)pid, msgp.mtext);
+    }
     
 
 }
 
 /* MAIN CONCERN BULLETIN
+    fork?
     are the loops making me overly worried that this just won't work?
-    do i bother with making the orders go to the right customer? if so, will it be easy?
+    how do i log the time of the event? gettimeofday()
+    "order content msg from customer PID" menu will be long string parsed by '\n' and random food items?
     do we need to regenerate an ftok for each process?
      
     Other concerns
