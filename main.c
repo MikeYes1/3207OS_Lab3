@@ -18,15 +18,9 @@ struct msgbuf{
     long mtype;
     char mtext[256]; //message data
 };
-/*
-struct timeval{
-    time_t tv_sec;
-    suseconds_t tv_usec;
-};
-*/
 
 
-void logSeconds(){
+void logSeconds(){ //A re-usable function that measures the time
     
     struct timeval timep;
     
@@ -35,7 +29,7 @@ void logSeconds(){
     
 }
 
-int waiting(int min, int max){
+int waiting(int min, int max){ //A re-usable function to wait for a random, specified amount of time.
     
     return min + rand() % (max - min + 1); 
     
@@ -46,9 +40,7 @@ void waiter(int customers, int orders, int qid){
     int element;
     struct msgbuf msgp;
     
-    pid_t pid = fork();
     
-    if(pid == 0){
         //Send a random food item to the customer
         char _line[1000] = "Pepino's Signature Pie|TyeDye Surprise|That's Amore Brunch|Pizza Ball|7-Up\n";
         char *line = strdup(_line);
@@ -61,6 +53,8 @@ void waiter(int customers, int orders, int qid){
             msgp.mtype = MENU;
             strcpy(msgp.mtext, array[element]);
             msgsnd(qid, &msgp, 256, 0);              //sends out the menu to the IPC
+            sleep(waiting(5, 5));
+            
             logSeconds();
             printf("\nThe waiter is about to pick up the meal...\n");
             sleep(waiting(2, 6));
@@ -74,25 +68,24 @@ void waiter(int customers, int orders, int qid){
         free(array);
         free(line);
     
-    } else if(pid < 0){
-        perror("fork failed");
-    }
+     
 }
 
 void customer(int orders, int qid){
-
+    
     struct msgbuf msgp;
     
     for(int i = 0; i < orders; i++){
         
+            pid_t pid = getpid();
             logSeconds();
             printf("\nCustomer %d is waiting for a menu...\n", (int)pid);
-            sleep(waiting(2, 6)); //actually blocking is all that's needed here but sleeping makes it predictable
+            sleep(waiting(2, 4)); //actually blocking is all that's needed here but sleeping makes it predictable
             msgrcv(qid, &msgp, 256, MENU, 0);
 
 
             //these 3 lines concatenate a menu item and "customer PID"
-            size_t needed = strlen(msgp.mtext + 48);
+            size_t needed = strlen(msgp.mtext) + 48;
             char *result = malloc(needed);
             snprintf(result, needed, "%s from customer %d", msgp.mtext, (int)pid); //ChatGPT made this line
 
@@ -120,21 +113,27 @@ void chef(int qid){
     
         int marker = 67;
         struct msgbuf msgp;
-        
     
         while(marker == 67){ 
             
-            msgrcv(qid, &msgp, 256, ORDER, 0);
-            logSeconds();
-            printf("\nChef %d is preparing: %s ...\n", (int)pid, msgp.mtext);
-            sleep(waiting(2, 6));
-        
-            msgp.mtype = ORDER_CMPL;
-            msgsnd(qid, &msgp, 256, 0);
-            logSeconds();
-            printf("\nChef %d completed: %s ...\n", (int)pid, msgp.mtext);
+            msgrcv(qid, &msgp, 256, ORDER, IPC_NOWAIT); 
+            
+            if(msgp.mtype == ORDER){
+                pid_t pid = getpid();
+                logSeconds();
+                printf("\nChef %d is preparing: %s ...\n", (int)pid, msgp.mtext);
+                sleep(waiting(2, 6));
+
+                msgp.mtype = ORDER_CMPL;
+                msgsnd(qid, &msgp, 256, 0);
+                    //perror("chef order not sent");
+                
+                logSeconds();
+                printf("\nChef %d completed: %s ...\n", (int)pid, msgp.mtext);
+            }
             
             msgrcv(qid, &msgp, 256, CLOSE, IPC_NOWAIT); //This segment checks for an exit signal in the IPC
+            //printf("hi mom");
             if(msgp.mtype == CLOSE){
                 marker = 0;
             }
@@ -179,21 +178,36 @@ int main(int argc, char **argv)
     pid_t pid = fork();
     
     if(pid == 0){
+        pid = fork(); 
+        
         srand(time(NULL)); 
         
-        waiter(customers, orders, qid);
-        
-        for(int i = 0; i < customers; i++){
-            pid = fork();
-            if(pid == 0){
-                customer(orders, qid); 
-            } else if(pid < 0){
-                perror("fork failed");
-            } /*else {
-                wait(NULL);
-            }*/
+        if(pid == 0){
+            waiter(customers, orders, qid);
+            //This dies after main dies surprisingly, you'll see if you print a statement here
+            exit(1);
+        } else if (pid < 0){
+            perror("fork failed");
+        } else {
+            for(int i = 0; i < customers; i++){
+                pid = fork();
+                if(pid == 0){
+                    customer(orders, qid); 
+                } else if(pid < 0){
+                    perror("fork failed");
+                } else {
+                    //This process dies immedietly
+                    exit(1);
+                }
+            }
+        }
+        msgp.mtype = CLOSE;
+        for(int i = 0; i < chefs; i++){ //I loop because I want each chef to get an exit message
+            msgsnd(qid, &msgp, 256, 0);
         }
         
+        puts("\nCustomers leave.");
+        exit(1);
     } else if (pid < 0){
         perror("fork failed");
     } else {
@@ -202,24 +216,26 @@ int main(int argc, char **argv)
             pid = fork();
             if(pid == 0){
                 chef(qid);
+                //puts("chef die");
+                exit(1);
             } else if(pid < 0){
                 perror("fork failed");
             } /*else {
-                wait(NULL);
+                exit(1);
             }*/
-           
         }
 
         while(wait(&status) > 0) {
-            ;
+            //printf("hello");
         }
-        
+        /*
         msgp.mtype = CLOSE;
         for(int i = 0; i < chefs; i++){ //I loop because I want each chef to get an exit message
             msgsnd(qid, &msgp, 256, 0);
-        }
+        }*/
     }
 
+    sleep(1);
     printf("\n\nCongratulations! You made it to the end!\n");
     
     return 0;
