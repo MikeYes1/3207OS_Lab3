@@ -7,6 +7,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include "helpers.h"
+#include <sys/wait.h>
 
 #define MENU 1
 #define ORDER 2
@@ -17,25 +18,13 @@ struct msgbuf{
     long mtype;
     char mtext[64]; //message data
 };
-
+/*
 struct timeval{
     time_t tv_sec;
     suseconds_t tv_usec;
 };
+*/
 
-key_t key = ftok("\mnt\c\Users\Aweso\SchoolArchive\3207OS\exe\key.txt", 'S');
-  if(key_t == -1){
-        perror("open file failed");
-        exit(1);
-  }
-  
-int qid = msgget(key, IPC_CREAT | 0666);
-  if(qid == -1){
-        perror("IPC open failed");
-        exit(1);
-  }
-
-//log layter
 
 void logSeconds(){
     
@@ -54,7 +43,7 @@ int waiting(int min, int max){
     
 }
 
-void waiter(int customers, int orders){
+void waiter(int customers, int orders, int qid){
 
     int element;
     struct msgbuf msgp;
@@ -70,12 +59,12 @@ void waiter(int customers, int orders){
         
         msgp.mtype = MENU;
         strcpy(msgp.mtext, array[element]);
-        msgsnd(qid, msgp, 256, NULL);              //sends out the menu to the IPC
+        msgsnd(qid, &msgp, 256, 0);              //sends out the menu to the IPC
         logSeconds();
         printf("\nThe waiter is about to pick up the meal...");
         sleep(waiting(2, 6));
         
-        msgrcv(qid, msgp, 256, ORDER_CMPL, NULL); //no flag, so we block until message is recieved
+        msgrcv(qid, &msgp, 256, ORDER_CMPL, 0); //no flag, so we block until message is recieved
         logSeconds();
         printf("\nThe waiter is cleaning the table...");
         sleep(waiting(2, 6));
@@ -84,19 +73,9 @@ void waiter(int customers, int orders){
     free(array);
     free(line);
     
-    
-    /*
-    Waiter, this is an actual process, loops aswell
-Send a message with the menu ID 
-... (they don't say anything but shouldn't this send an order?)
-Then, (organically) wait to recieve a message with the order-complete ID
-Wait for some time to simulate cleaning table (idk how this fits in w customer loop resetting)
-Send another message with a menu ID
-Reset loop until no customers(?)
-    */
 }
 
-void customer(int orders){
+void customer(int orders, int qid){
     pid_t pid = fork();
     
     if(pid == 0){
@@ -107,25 +86,27 @@ void customer(int orders){
         
             logSeconds();
             printf("\nCustomer %d is waiting for a menu...", (int)pid);
-            sleep(waiting(2, 6)); //actually blocking is all that's needed
-            msgrcv(qid, msgp, 256, MENU, NULL);
+            sleep(waiting(2, 6)); //actually blocking is all that's needed here but sleeping makes it predictable
+            msgrcv(qid, &msgp, 256, MENU, 0);
+
 
             //these 3 lines concatenate a menu item and "customer PID"
             size_t needed = strlen(msgp.mtext + 48);
             char *result = malloc(needed);
             snprintf(result, needed, "%s from customer %d", msgp.mtext, (int)pid); //ChatGPT made this line
 
+
             logSeconds();
             printf("\nCustomer %d is eyeing '%s'...", (int)pid, msgp.mtext);
             sleep(waiting(2,6));
             msgp.mtype = ORDER;
-            strcpy(msgp.mtext, result); //this PID and then 
-            msgsnd(qid, msgp, 256, NULL); //what's the deal with PID bro
+            strcpy(msgp.mtext, result); 
+            msgsnd(qid, &msgp, 256, 0); 
         
             logSeconds();
             printf("\nCustomer %d is either eating or waiting...", (int)pid);
-            sleep(waiting(2, 6)); //should it recieve the food? ...
-        
+            sleep(waiting(2, 6)); 
+            
             free(result);
 
         }
@@ -134,44 +115,33 @@ void customer(int orders){
     } /*else(){
         wait(NULL);
     }*/
-    /*
-Customers run in a loop that 
-waits for a menu, message with menu ID
-once menu got, wait for a couple seconds to simulate choosing
-sends a message with the order ID and the customer's PID (from fork?)
-a wait a couple seconds for the waiting for food(?) and also for eating the food
-once done, repeats the loop (free table for other customer?)
-    */
+
     
 }
 
 
-void chef(){
+void chef(int qid){
     pid_t pid = fork();
     
     if(pid == 0){
         int marker = 67;
         struct msgbuf msgp;
         pid = getpid();
-    
-        //loop but what's the condition "continue when there's another order"
-                    //ig maybe when customers are done send some sort of signal out here to say we're done.
-
-    
-    
-        while(marker == 67){ //find way to terminate loop
         
-            msgrcv(qid, msgp, 256, ORDER, NULL);
+    
+        while(marker == 67){ 
+            
+            msgrcv(qid, &msgp, 256, ORDER, 0);
             logSeconds();
             printf("\nChef %d is preparing: %s ...", (int)pid, msgp.mtext);
             sleep(waiting(2, 6));
         
             msgp.mtype = ORDER_CMPL;
-            msgsnd(qid, msgp, 256, NULL);
+            msgsnd(qid, &msgp, 256, 0);
             logSeconds();
             printf("\nChef %d completed: %s ...", (int)pid, msgp.mtext);
             
-            msgrcv(qid, msgp, 256, CLOSE, IPC_NOWAIT); //This checks for exit signals in the IPC
+            msgrcv(qid, &msgp, 256, CLOSE, IPC_NOWAIT); //This segment checks for an exit signal in the IPC
             if(msgp.mtype == CLOSE){
                 marker = 0;
             }
@@ -180,26 +150,30 @@ void chef(){
     } else if(pid < 0){
         perror("fork failed");
     }
+    //Skip parent's wait(NULL) to achieve concurrency
 
 }
 
-/* MAIN CONCERN BULLETIN
-    fork?
-    are the loops making me overly worried that this just won't work?
-    do we need to regenerate an ftok for each process?
-     
-    Other concerns
-    should the parent be a waiter?
-    random numbers
-    how to stop everyone
-    log
-*/
+
 
 
 int main(int argc, char **argv)
 {
-    int orders, customers, chefs;
+    int orders, customers, chefs, status;
     struct msgbuf msgp;
+    
+    
+    key_t key = ftok("/mnt/c/Users/Aweso/SchoolArchive/3207OS/exe/key.txt", 'S');
+    if(key == -1){
+        perror("open file failed");
+        exit(1);
+    }
+  
+    int qid = msgget(key, IPC_CREAT | 0666);
+    if(qid == -1){
+        perror("IPC open failed");
+        exit(1);
+    }
     
     
     printf("Welcome to Professor Pizza's Palace! The best slices on this side of where we are...\n\n"
@@ -210,14 +184,14 @@ int main(int argc, char **argv)
     printf("Input the number of chefs: ");
     scanf("%d", &chefs);
     
-
+    
     pid_t pid = fork();
     
     if(pid == 0){
-        waiter(customers, orders);
+        waiter(customers, orders, qid);
         
         for(int i = 0; i < customers; i++){
-            customer(orders);
+            customer(orders, qid);
         }
         
     } else if (pid < 0){
@@ -225,14 +199,16 @@ int main(int argc, char **argv)
     } else {
         
         for(int i = 0; i < chefs; i++){
-            chef();
+            chef(qid);
+        }
+
+        while(wait(&status) > 0) {
+            ;
         }
         
-        wait(NULL);
-        
         msgp.mtype = CLOSE;
-        for(int i = 0; i < chefs; i++){ //We loop because we want each che
-            msgsnd(qid msgp, 256, NULL);
+        for(int i = 0; i < chefs; i++){ //I loop because I want each chef to get an exit message
+            msgsnd(qid, &msgp, 256, 0);
         }
     }
 
